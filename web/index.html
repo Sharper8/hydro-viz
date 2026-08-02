@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bassins versants — Jura · Préalpes Nord</title>
+    <meta
+      name="description"
+      content="Carte interactive des bassins versants de l'hydroécorégion Jura – Préalpes du Nord, d'après la BD Topage® (Sandre / OFB)."
+    />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header class="sidebar-header">
+          <h1>Bassins versants</h1>
+          <p class="subtitle">Jura · Préalpes Nord</p>
+          <p id="zone-stats" class="stats">Chargement…</p>
+        </header>
+
+        <div class="search-block">
+          <input
+            id="search"
+            type="search"
+            placeholder="Rechercher un bassin, une rivière, un lac…"
+            autocomplete="off"
+            aria-label="Rechercher une entité"
+          />
+          <div id="filters" class="filters" role="group" aria-label="Filtrer par couche">
+            <button type="button" class="chip is-active" data-couche="tous">Tout</button>
+            <button type="button" class="chip" data-couche="bassins">Bassins</button>
+            <button type="button" class="chip" data-couche="cours_eau">Cours d'eau</button>
+            <button type="button" class="chip" data-couche="plans_eau">Plans d'eau</button>
+          </div>
+        </div>
+
+        <p id="result-count" class="result-count"></p>
+        <ul id="results" class="results" role="listbox" aria-label="Résultats"></ul>
+
+        <footer class="sidebar-footer">
+          <p>
+            Données <a href="https://www.sandre.eaufrance.fr/" target="_blank" rel="noopener">BD Topage® 2025</a>
+            — Sandre / OFB · Fond <a href="https://geoservices.ign.fr/" target="_blank" rel="noopener">IGN Géoplateforme</a>
+          </p>
+        </footer>
+      </aside>
+
+      <main id="map-wrap">
+        <div id="map"></div>
+
+        <div id="basemap-switch" class="basemap-switch" role="group" aria-label="Fond de carte">
+          <button type="button" class="is-active" data-fond="plan">Plan IGN</button>
+          <button type="button" data-fond="ortho">Photo</button>
+          <button type="button" data-fond="osm">OSM</button>
+        </div>
+
+        <div id="legend" class="legend">
+          <h2>Légende</h2>
+          <ul>
+            <li><span class="swatch swatch-bassin"></span>Bassin versant</li>
+            <li><span class="swatch swatch-riviere"></span>Cours d'eau</li>
+            <li><span class="swatch swatch-plan"></span>Plan d'eau</li>
+            <li><span class="swatch swatch-zone"></span>Limite de l'hydroécorégion</li>
+          </ul>
+        </div>
+
+        <section id="info-panel" class="info-panel" hidden aria-live="polite">
+          <button type="button" id="info-close" class="info-close" aria-label="Fermer">&times;</button>
+          <p id="info-kind" class="info-kind"></p>
+          <h2 id="info-name"></h2>
+          <dl id="info-attrs"></dl>
+          <button type="button" id="info-zoom" class="info-zoom">Zoomer sur l'entité</button>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

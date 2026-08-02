@@ -1,0 +1,20 @@
+{
+  "name": "hydro-viz",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "maplibre-gl": "^5.9.0",
+    "pmtiles": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0"
+  }
+}

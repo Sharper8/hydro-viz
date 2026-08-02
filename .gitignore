@@ -1,0 +1,13 @@
+# Données brutes et intermédiaires : régénérées par le pipeline (scripts/)
+data/raw/
+data/prepared/
+
+# Node / Vite
+node_modules/
+web/dist/
+*.log
+
+# Divers
+.DS_Store
+.venv/
+__pycache__/
