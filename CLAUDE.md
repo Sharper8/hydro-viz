@@ -76,6 +76,48 @@ Outils à installer (VM Ubuntu, apt/pip disponibles) : `gdal-bin` (ogr2ogr), `ti
 - Déploy via GitHub Actions officielles Pages (`actions/upload-pages-artifact` +
   `actions/deploy-pages`). Pages source = « GitHub Actions ».
 
+## Phase 2 (en cours) — France entière + fleuves principaux + dark mode
+
+Le MVP (HER Jura-Préalpes Nord uniquement) est livré et déployé. Phase 2, demandée par Sylva :
+
+1. **Passage à la France métropolitaine entière.** Mêmes jeux Sandre, emprise nationale.
+   Attention RAM (3,7 Go) : traiter en streaming (ogr2ogr/SQLite, pyarrow), éviter de charger
+   tout CoursEau national en geopandas. Le zip national complet fait 1,75 Go — préférer les
+   zips par jeu de données si raisonnables, sinon WFS paginé national.
+2. **Fleuves principaux & bassins agrégés** (le cœur de la demande) :
+   - Construire le graphe amont/aval à partir des nœuds hydrographiques BD TOPAGE.
+   - Pour chaque cours d'eau : longueur, **longueur cumulée amont** (proxy « importance »),
+     nombre d'affluents. Les « fleuves principaux » émergent du cumul (pas de seuil en dur :
+     les métriques sont cuites en attributs et le filtrage est dynamique côté client).
+   - Pour chaque bassin versant topographique : `main_stem_id` = le fleuve principal dans
+     lequel il se jette (via le graphe). Permet de colorer « qui va avec quoi » et d'agréger
+     le bassin complet d'un fleuve (ex. tout le Rhône).
+   - Couche `RegionHydrographique` Sandre (1er ordre = grands bassins : Rhône, Loire,
+     Seine…) pour la vue « bassin entier » immédiate.
+   - Pré-calculer les polygones dissous (union des BVT) pour les ~30-50 fleuves principaux.
+3. **UI** :
+   - Slider « importance minimale des rivières » → filtre MapLibre live sur l'attribut cumulé.
+   - Liste des fleuves principaux (Rhône, Saône, Doubs, Ain…) ; clic → highlight du bassin
+     agrégé + stats (nb affluents, surface, longueur).
+   - **Thème sombre** : fond CARTO Dark Matter raster (sans clé,
+     `https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json` existe aussi en
+     vectoriel) ; palette catégorielle distincte par fleuve principal (rivières ET bassins
+     teintés selon `main_stem_id`, les non-classés en gris/bleu neutre).
+   - Conserver sidebar, recherche, clic→fiche info.
+4. **Budget tuiles national** : chaque PMTiles doit rester < ~90 Mo (hébergement GitHub
+   Pages, pas d'alternative pour l'instant). Techniques : `tippecanoe` avec
+   `{"tippecanoe":{"minzoom":N}}` par feature (bas zoom = seulement les gros fleuves/bassins,
+   détail complet à partir de z≈10), `--drop-densest-as-needed`, simplification géométrique
+   en fonction du zoom. Mesurer et reporter la taille finale par couche.
+5. **Domaine custom** : `hydro.devprocore.com` (CNAME déjà créé côté Cloudflare, DNS-only,
+   pointe sur sharper8.github.io). Passer Vite en `base: '/'`, ajouter `public/CNAME` contenant
+   `hydro.devprocore.com`. Ne PAS appeler l'API Cloudflare (token DNS-only, hors scope).
+   Le README doit référencer https://hydro.devprocore.com comme URL canonique.
+
+Données débit : PAS dans BD TOPAGE (les débits sont côté Hub'Eau/stations — phase ultérieure).
+Le classement « rivière principale » se fonde donc sur longueur cumulée amont + nb affluents +
+surface de bassin, tous calculables localement.
+
 ## Explicitement HORS scope (idées pour plus tard, ne pas implémenter)
 
 Simulation/délimitation à la volée (pysheds, WASM), débits, barrages, jumeau virtuel,
