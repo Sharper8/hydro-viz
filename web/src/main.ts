@@ -6,7 +6,13 @@ import { BASEMAPS, type BasemapId } from "./basemaps";
 import { STEM_COLORS, NEUTRAL, stemColor, stemColorExpression } from "./palette";
 import type { Fleuve, IndexFile, IndexEntry, LayerId, Stem } from "./types";
 
-const BASE = import.meta.env.BASE_URL;
+/**
+ * Base absolue du site, résolue à l'exécution. Vite construit avec une base
+ * relative (« ./ ») pour que la même sortie serve à la racine du domaine custom
+ * comme sous /hydro-viz/ ; MapLibre, lui, exige une URL absolue pour le
+ * protocole pmtiles://.
+ */
+const BASE = new URL(import.meta.env.BASE_URL, location.href).href;
 
 /** Le protocole `pmtiles://` permet à MapLibre de lire les archives en Range Requests. */
 maplibregl.addProtocol("pmtiles", new Protocol().tile);
@@ -78,7 +84,7 @@ function addDataLayers() {
   for (const name of SOURCES) {
     map.addSource(name, {
       type: "vector",
-      url: `pmtiles://${location.origin}${BASE}tiles/${name}.pmtiles`,
+      url: `pmtiles://${BASE}tiles/${name}.pmtiles`,
       // permet d'utiliser le survol via feature-state sur l'attribut `id`
       promoteId: "id",
     });

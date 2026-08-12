@@ -160,7 +160,16 @@ services Sandre. Pour régénérer les données depuis la source : onglet
 `regenerer_donnees`.
 
 Le domaine `hydro.devprocore.com` est servi via `web/public/CNAME` (DNS géré
-côté Cloudflare, enregistrement CNAME DNS-only vers `sharper8.github.io`).
+côté Cloudflare, enregistrement CNAME DNS-only vers `sharper8.github.io`). Le
+fichier CNAME de l'artefact n'a pas suffi à enregistrer le domaine côté API :
+il a fallu `gh api repos/Sharper8/hydro-viz/pages -X PUT -f cname=…`.
+
+GitHub ne redirige pas la page projet vers le domaine custom : les deux URLs
+sont donc servies telles quelles. Vite construit avec une **base relative**
+(`./`) et l'application résout sa base à l'exécution
+(`new URL(import.meta.env.BASE_URL, location.href)`), si bien que la même
+sortie fonctionne montée à la racine comme sous `/hydro-viz/` — sans build
+séparé.
 
 ## Notes et limites
 
