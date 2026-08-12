@@ -1,14 +1,68 @@
 #!/usr/bin/env bash
-# Étape 1 — Téléchargement des données sources (Sandre / BD Topage®).
+# Étape 1 — Téléchargement des données sources nationales (Sandre / BD Topage®).
 #
-# Le zip national BD Topage 2025 pèse ~1,75 Go : on passe donc par le WFS Sandre
-# paginé, filtré sur la bbox de la zone d'étude (cf. CLAUDE.md).
+# Phase 2 : emprise France métropolitaine. On télécharge les zips *par jeu de
+# données* plutôt que le zip national complet (1,75 Go) — ils sont plus petits,
+# reprenables individuellement et permettent de ne dézipper que le nécessaire.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
 log() { printf '\033[36m[download]\033[0m %s\n' "$*" >&2; }
 
-# --- 1. Couche des hydroécorégions de niveau 1 ---------------------------------
+# --- 1. Jeux BD Topage nationaux ----------------------------------------------
+for entry in "${TOPAGE_SETS[@]}"; do
+  name="${entry%%:*}"
+  path="${entry#*:}"
+  zip="$NAT_DIR/$(basename "$path")"
+  if [[ -s "$zip" ]]; then
+    log "$name : déjà présent ($(du -h "$zip" | cut -f1)), saut."
+    continue
+  fi
+  log "$name : téléchargement de $(basename "$path")…"
+  curl -sS -f -m 6000 -o "$zip.part" "$TOPAGE_BASE/$path"
+  mv "$zip.part" "$zip"
+  log "$name -> $zip ($(du -h "$zip" | cut -f1))"
+done
+
+# --- 2. Décompression ---------------------------------------------------------
+# TronconHydrographique n'est utilisé que pour la topologie (nœuds amont/aval) :
+# ses .dbf suffisent, on n'extrait donc pas les 742 Mo de géométries.
+unzip_set() {
+  local name="$1" zip="$2" dest="$NAT_DIR/$3"
+  if [[ -d "$dest" ]]; then
+    log "$name : déjà décompressé."
+    return
+  fi
+  log "$name : décompression…"
+  unzip -o -q "$zip" -d "$dest"
+}
+
+unzip_set bassins "$NAT_DIR/BassinVersantTopographique_FXX-shp.zip" BassinVersantTopographique_FXX
+unzip_set cours_eau "$NAT_DIR/CoursEau_FXX-shp.zip" CoursEau_FXX
+unzip_set plans_eau "$NAT_DIR/PlanEau_FXX-shp.zip" PlanEau_FXX
+unzip_set bassins_hydro "$NAT_DIR/BassinHydrographique_FXX-shp.zip" BassinHydrographique_FXX
+
+# --- 3. Tronçons : uniquement la table attributaire, bassin par bassin ---------
+# Le zip contient un shapefile par grand bassin hydrographique. On extrait le
+# .dbf d'un bassin, on en tire les 6 colonnes utiles en CSV, puis on le supprime
+# avant de passer au suivant : le pic d'occupation disque reste ~700 Mo.
+troncon_csv="$NAT_DIR/troncon_csv"
+if [[ ! -d "$troncon_csv" ]]; then
+  mkdir -p "$troncon_csv.part"
+  for b in 01 02 03 04 05 06 12; do
+    member="shp_bassins/TronconHydrographique_FXX_bassin_${b}.dbf"
+    unzip -l "$NAT_DIR/TronconHydrographique_FXX-shp.zip" "$member" >/dev/null 2>&1 || continue
+    unzip -o -q -j "$NAT_DIR/TronconHydrographique_FXX-shp.zip" "$member" -d "$NAT_DIR/tmp_dbf"
+    ogr2ogr -f CSV "$troncon_csv.part/$b.csv" \
+      "$NAT_DIR/tmp_dbf/TronconHydrographique_FXX_bassin_${b}.dbf" \
+      -select CdOH,CdNoeudDeb,CdNoeudFin,CdCoursEau,SensEcoule,TronconFic
+    rm -rf "$NAT_DIR/tmp_dbf"
+    log "tronçons bassin $b : $(( $(wc -l < "$troncon_csv.part/$b.csv") - 1 )) entités"
+  done
+  mv "$troncon_csv.part" "$troncon_csv"
+fi
+
+# --- 4. Hydroécorégions de niveau 1 (couche de référence, via WFS) -------------
 her1_file="$RAW_DIR/her1.geojson"
 if [[ ! -s "$her1_file" ]]; then
   log "HER niveau 1 ($HER1_LAYER)…"
@@ -20,7 +74,7 @@ if [[ ! -s "$her1_file" ]]; then
     --data-urlencode "OUTPUTFORMAT=$WFS_FORMAT" \
     --data-urlencode "SRSNAME=EPSG:4326" \
     -o "$her1_file.tmp"
-  if ! python3 -c "import json,sys; json.load(open('$her1_file.tmp'))" 2>/dev/null; then
+  if ! python3 -c "import json; json.load(open('$her1_file.tmp'))" 2>/dev/null; then
     log "ERREUR : réponse WFS invalide pour les HER. Voir $her1_file.tmp"
     exit 1
   fi
@@ -28,50 +82,4 @@ if [[ ! -s "$her1_file" ]]; then
 fi
 log "HER1 : $(du -h "$her1_file" | cut -f1)"
 
-# --- 2. Zone d'étude : HER1 code 5, et sa bbox --------------------------------
-zone_file="$RAW_DIR/zone.geojson"
-python3 "$ROOT_DIR/scripts/extract_zone.py" "$her1_file" "$HER1_CODE" "$zone_file"
-# bbox au format lat_min,lon_min,lat_max,lon_max (ordre WFS 2.0 / urn EPSG::4326)
-bbox="$(python3 "$ROOT_DIR/scripts/extract_zone.py" --bbox "$zone_file")"
-log "bbox zone d'étude (lat,lon) : $bbox"
-
-# --- 3. Couches BD Topage, paginées sur la bbox -------------------------------
-fetch_layer() {
-  local layer="$1" out="$2"
-  if [[ -s "$out" ]]; then
-    log "$layer : déjà présent ($(du -h "$out" | cut -f1)), saut."
-    return
-  fi
-  local total start=0 page_dir
-  total="$(curl -sS -m 300 -G "$WFS_URL" \
-    --data-urlencode "SERVICE=WFS" --data-urlencode "VERSION=2.0.0" \
-    --data-urlencode "REQUEST=GetFeature" --data-urlencode "TYPENAMES=$layer" \
-    --data-urlencode "RESULTTYPE=hits" \
-    --data-urlencode "BBOX=$bbox,$WFS_BBOX_CRS" \
-    | grep -oE 'numberMatched="[0-9]+"' | grep -oE '[0-9]+')"
-  log "$layer : $total entités dans la bbox"
-
-  page_dir="$RAW_DIR/pages_$(basename "$out" .geojson)"
-  rm -rf "$page_dir"; mkdir -p "$page_dir"
-  while [[ $start -lt $total ]]; do
-    log "  page $((start / WFS_PAGE_SIZE + 1)) (startIndex=$start)"
-    curl -sS -m 600 -G "$WFS_URL" \
-      --data-urlencode "SERVICE=WFS" --data-urlencode "VERSION=2.0.0" \
-      --data-urlencode "REQUEST=GetFeature" --data-urlencode "TYPENAMES=$layer" \
-      --data-urlencode "OUTPUTFORMAT=$WFS_FORMAT" \
-      --data-urlencode "SRSNAME=EPSG:4326" \
-      --data-urlencode "COUNT=$WFS_PAGE_SIZE" --data-urlencode "STARTINDEX=$start" \
-      --data-urlencode "BBOX=$bbox,$WFS_BBOX_CRS" \
-      -o "$page_dir/$(printf '%06d' "$start").geojson"
-    start=$((start + WFS_PAGE_SIZE))
-  done
-  python3 "$ROOT_DIR/scripts/merge_pages.py" "$page_dir" "$out"
-  rm -rf "$page_dir"
-  log "$layer -> $out ($(du -h "$out" | cut -f1))"
-}
-
-fetch_layer "$BV_LAYER" "$RAW_DIR/bassins.geojson"
-fetch_layer "$CE_LAYER" "$RAW_DIR/cours_eau.geojson"
-fetch_layer "$PE_LAYER" "$RAW_DIR/plans_eau.geojson"
-
-log "Terminé. Sources dans $RAW_DIR"
+log "Terminé. Sources dans $NAT_DIR"

@@ -6,13 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       regenerer_donnees:
-        description: "Rejouer le pipeline de données Sandre (téléchargement + tuiles)"
+        description: "Rejouer le pipeline de données Sandre (téléchargement + graphe + tuiles)"
         type: boolean
         default: false
 
-# Les PMTiles sont versionnés (6,7 Mo) : le déploiement courant ne dépend donc pas
-# de la disponibilité des services Sandre. Le pipeline complet reste rejouable à la
-# demande via « Run workflow » en cochant « regenerer_donnees ».
+# Les PMTiles nationaux sont versionnés (~77 Mo) : le déploiement courant ne
+# dépend donc pas de la disponibilité des services Sandre. Le pipeline complet
+# (≈1 Go de téléchargement, ~10 min) reste rejouable à la demande via
+# « Run workflow » en cochant « regenerer_donnees ».
 permissions:
   contents: read
   pages: write
@@ -33,14 +34,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gdal-bin tippecanoe
-          pip install geopandas shapely pyogrio
+          pip install geopandas shapely pyogrio pandas
 
-      - name: Pipeline de données (téléchargement Sandre → PMTiles)
+      - name: Pipeline de données (Sandre → graphe → PMTiles)
         if: inputs.regenerer_donnees
-        run: |
-          ./scripts/download.sh
-          python3 scripts/prepare.py
-          ./scripts/tiles.sh
+        run: ./scripts/run-all.sh
 
       - uses: actions/setup-node@v4
         with:
@@ -53,8 +51,6 @@ jobs:
         run: |
           npm ci
           npm run build
-        env:
-          VITE_BASE: /hydro-viz/
 
       - uses: actions/upload-pages-artifact@v3
         with:

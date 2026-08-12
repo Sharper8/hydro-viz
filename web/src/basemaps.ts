@@ -1,8 +1,8 @@
 import type { RasterSourceSpecification } from "maplibre-gl";
 
-export type BasemapId = "plan" | "ortho" | "osm";
+export type BasemapId = "sombre" | "plan" | "ortho" | "osm";
 
-/** Fonds de plan libres, sans clé API : Géoplateforme IGN + OpenStreetMap. */
+/** Fonds de plan libres, sans clé API : CARTO, Géoplateforme IGN, OpenStreetMap. */
 const IGN_WMTS = "https://data.geopf.fr/wmts";
 
 function ignWmts(layer: string, format: string): string {
@@ -22,9 +22,28 @@ function ignWmts(layer: string, format: string): string {
   return `${IGN_WMTS}?${params.toString().replace(/%7B/g, "{").replace(/%7D/g, "}")}`;
 }
 
-export const BASEMAPS: Record<BasemapId, { label: string; source: RasterSourceSpecification }> = {
+export const BASEMAPS: Record<
+  BasemapId,
+  { label: string; sombre: boolean; source: RasterSourceSpecification }
+> = {
+  sombre: {
+    label: "Sombre",
+    sombre: true,
+    source: {
+      type: "raster",
+      tiles: [
+        "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+        "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+        "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+      ],
+      tileSize: 256,
+      maxzoom: 18,
+      attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+    },
+  },
   plan: {
     label: "Plan IGN",
+    sombre: false,
     source: {
       type: "raster",
       tiles: [ignWmts("GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", "image/png")],
@@ -34,7 +53,8 @@ export const BASEMAPS: Record<BasemapId, { label: string; source: RasterSourceSp
     },
   },
   ortho: {
-    label: "Photo aérienne",
+    label: "Photo",
+    sombre: true,
     source: {
       type: "raster",
       tiles: [ignWmts("ORTHOIMAGERY.ORTHOPHOTOS", "image/jpeg")],
@@ -44,7 +64,8 @@ export const BASEMAPS: Record<BasemapId, { label: string; source: RasterSourceSp
     },
   },
   osm: {
-    label: "OpenStreetMap",
+    label: "OSM",
+    sombre: false,
     source: {
       type: "raster",
       tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],

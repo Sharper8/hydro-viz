@@ -1,9 +1,10 @@
-import maplibregl from "maplibre-gl";
+import maplibregl, { type ExpressionSpecification } from "maplibre-gl";
 import { Protocol } from "pmtiles";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./style.css";
 import { BASEMAPS, type BasemapId } from "./basemaps";
-import type { IndexFile, IndexEntry, LayerId } from "./types";
+import { STEM_COLORS, NEUTRAL, stemColor, stemColorExpression } from "./palette";
+import type { Fleuve, IndexFile, IndexEntry, LayerId, Stem } from "./types";
 
 const BASE = import.meta.env.BASE_URL;
 
@@ -16,17 +17,27 @@ const LAYER_LABELS: Record<LayerId, string> = {
   plans_eau: "Plan d'eau",
 };
 
+/**
+ * Paliers du curseur d'importance, en km de longueur cumulée amont. L'échelle
+ * est logarithmique : entre « toutes les rivières » et « le Rhône seul » il y a
+ * quatre ordres de grandeur.
+ */
+const PALIERS = [0, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 15000];
+
+/** Zoom où les bassins agrégés cèdent la place aux bassins versants de détail. */
+const ZOOM_BASCULE = 7;
+
 const map = new maplibregl.Map({
   container: "map",
   style: {
     version: 8,
     glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-    sources: { fond: BASEMAPS.plan.source },
+    sources: { fond: BASEMAPS.sombre.source },
     layers: [{ id: "fond", type: "raster", source: "fond" }],
   },
-  center: [6.1, 46.2],
-  zoom: 7,
-  maxZoom: 15,
+  center: [2.6, 46.6],
+  zoom: 5,
+  maxZoom: 14,
   attributionControl: false,
 });
 
@@ -42,36 +53,52 @@ map.addControl(
 
 // --- État de l'application ----------------------------------------------------
 let entries: IndexEntry[] = [];
+let fleuves: Fleuve[] = [];
+let stems: Stem[] = [];
 const bboxById = new Map<string, [number, number, number, number]>();
 let activeFilter: LayerId | "tous" = "tous";
 let selected: { id: string; couche: LayerId } | null = null;
-let hovered: { id: string; couche: LayerId } | null = null;
-let currentBasemap: BasemapId = "plan";
+let selectedFleuve: Fleuve | null = null;
+let hovered: string | null = null;
+let currentBasemap: BasemapId = "sombre";
 let ignFallbackDone = false;
+let seuilImportance = 0;
+
+const SOURCES = [
+  "bassins",
+  "cours_eau",
+  "plans_eau",
+  "bassins_hydro",
+  "her1",
+  "fleuves_bassins",
+] as const;
 
 // --- Couches de données -------------------------------------------------------
 function addDataLayers() {
-  for (const name of ["zone", "bassins", "cours_eau", "plans_eau"]) {
+  for (const name of SOURCES) {
     map.addSource(name, {
       type: "vector",
       url: `pmtiles://${location.origin}${BASE}tiles/${name}.pmtiles`,
       // permet d'utiliser le survol via feature-state sur l'attribut `id`
-      promoteId: name === "zone" ? undefined : "id",
+      promoteId: "id",
     });
   }
 
+  // Bassins versants : aplat teinté par fleuve récepteur — c'est la lecture
+  // « qui va avec quoi » demandée.
   map.addLayer({
     id: "bassins-fill",
     type: "fill",
     source: "bassins",
     "source-layer": "bassins",
+    minzoom: ZOOM_BASCULE,
     paint: {
-      "fill-color": "#0ea5e9",
+      "fill-color": stemColorExpression(),
       "fill-opacity": [
         "case",
         ["boolean", ["feature-state", "hover"], false],
-        0.34,
-        0.12,
+        0.55,
+        0.22,
       ],
     },
   });
@@ -81,22 +108,63 @@ function addDataLayers() {
     type: "line",
     source: "bassins",
     "source-layer": "bassins",
+    minzoom: ZOOM_BASCULE,
     paint: {
-      "line-color": "#0369a1",
-      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 0.6, 10, 1.4, 14, 2.2],
-      "line-opacity": 0.85,
+      "line-color": stemColorExpression("#7a8c99"),
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 0.3, 10, 0.8, 14, 1.4],
+      "line-opacity": 0.5,
     },
   });
 
-  // Mise en évidence du bassin sélectionné : sous le réseau hydrographique, pour
-  // que rivières et plans d'eau restent lisibles par-dessus l'aplat orangé.
+  // À l'échelle nationale, les 6 190 bassins versants (89 km² en moyenne) sont
+  // illisibles : ce sont les bassins agrégés des fleuves qui portent la lecture
+  // « qui va avec quoi », puis les BVT prennent le relais à partir de z7. Les
+  // douze bassins teintés sont emboîtés dans aucun autre, ils ne se recouvrent
+  // donc pas.
+  map.addLayer({
+    id: "fleuves-bassins-teinte",
+    type: "fill",
+    source: "fleuves_bassins",
+    "source-layer": "fleuves_bassins",
+    maxzoom: ZOOM_BASCULE,
+    filter: [">", ["coalesce", ["get", "stem"], 0], 0],
+    paint: { "fill-color": stemColorExpression(), "fill-opacity": 0.35 },
+  });
+  map.addLayer({
+    id: "fleuves-bassins-contour",
+    type: "line",
+    source: "fleuves_bassins",
+    "source-layer": "fleuves_bassins",
+    maxzoom: ZOOM_BASCULE,
+    filter: [">", ["coalesce", ["get", "stem"], 0], 0],
+    paint: { "line-color": stemColorExpression(), "line-width": 1, "line-opacity": 0.8 },
+  });
+
+  // Bassin agrégé du fleuve sélectionné (union pré-calculée des BVT).
+  map.addLayer({
+    id: "fleuve-bassin-fill",
+    type: "fill",
+    source: "fleuves_bassins",
+    "source-layer": "fleuves_bassins",
+    filter: ["==", ["get", "id"], ""],
+    paint: { "fill-color": "#f8fafc", "fill-opacity": 0.1 },
+  });
+  map.addLayer({
+    id: "fleuve-bassin-line",
+    type: "line",
+    source: "fleuves_bassins",
+    "source-layer": "fleuves_bassins",
+    filter: ["==", ["get", "id"], ""],
+    paint: { "line-color": "#f8fafc", "line-width": 2.5, "line-opacity": 0.95 },
+  });
+
   map.addLayer({
     id: "select-bassin-fill",
     type: "fill",
     source: "bassins",
     "source-layer": "bassins",
     filter: ["==", ["get", "id"], ""],
-    paint: { "fill-color": "#f59e0b", "fill-opacity": 0.28 },
+    paint: { "fill-color": "#fbbf24", "fill-opacity": 0.3 },
   });
   map.addLayer({
     id: "select-bassin-line",
@@ -104,7 +172,7 @@ function addDataLayers() {
     source: "bassins",
     "source-layer": "bassins",
     filter: ["==", ["get", "id"], ""],
-    paint: { "line-color": "#b45309", "line-width": 3 },
+    paint: { "line-color": "#fbbf24", "line-width": 2.5 },
   });
 
   map.addLayer({
@@ -112,7 +180,7 @@ function addDataLayers() {
     type: "fill",
     source: "plans_eau",
     "source-layer": "plans_eau",
-    paint: { "fill-color": "#0284c7", "fill-opacity": 0.75 },
+    paint: { "fill-color": "#38bdf8", "fill-opacity": 0.7 },
   });
   map.addLayer({
     id: "select-plan-eau",
@@ -120,54 +188,99 @@ function addDataLayers() {
     source: "plans_eau",
     "source-layer": "plans_eau",
     filter: ["==", ["get", "id"], ""],
-    paint: { "fill-color": "#f59e0b", "fill-opacity": 0.85 },
+    paint: { "fill-color": "#fbbf24", "fill-opacity": 0.9 },
   });
 
+  // Réseau hydrographique : couleur = fleuve récepteur, épaisseur = importance.
   map.addLayer({
     id: "cours-eau-line",
     type: "line",
     source: "cours_eau",
     "source-layer": "cours_eau",
     paint: {
-      // les grands cours d'eau sont tracés plus épais que les affluents
-      "line-color": "#0369a1",
+      "line-color": stemColorExpression(),
       "line-width": [
         "interpolate",
         ["linear"],
         ["zoom"],
-        6,
-        ["interpolate", ["linear"], ["coalesce", ["get", "longueur_km"], 0], 0, 0.3, 60, 1.6],
-        11,
-        ["interpolate", ["linear"], ["coalesce", ["get", "longueur_km"], 0], 0, 0.8, 60, 3.4],
-        14,
-        ["interpolate", ["linear"], ["coalesce", ["get", "longueur_km"], 0], 0, 1.6, 60, 5],
+        4,
+        largeurSelonImportance(0.4, 1.8),
+        8,
+        largeurSelonImportance(0.5, 3.2),
+        12,
+        largeurSelonImportance(1.0, 6),
       ],
+      "line-opacity": 0.9,
     },
   });
 
-  // Le cours d'eau sélectionné passe au-dessus du reste du réseau.
   map.addLayer({
     id: "select-cours-eau",
     type: "line",
     source: "cours_eau",
     "source-layer": "cours_eau",
     filter: ["==", ["get", "id"], ""],
-    paint: { "line-color": "#f59e0b", "line-width": 4, "line-opacity": 0.95 },
+    paint: { "line-color": "#fbbf24", "line-width": 4, "line-opacity": 0.95 },
   });
 
+  // Contours de référence : 7 grands bassins hydrographiques, 22 HER.
   map.addLayer({
-    id: "zone-line",
+    id: "bassins-hydro-line",
     type: "line",
-    source: "zone",
-    "source-layer": "zone",
+    source: "bassins_hydro",
+    "source-layer": "bassins_hydro",
     paint: {
-      "line-color": "#b45309",
-      "line-width": 2,
-      "line-dasharray": [3, 2],
-      "line-opacity": 0.9,
+      "line-color": "#e2e8f0",
+      "line-width": 1.6,
+      "line-opacity": 0.55,
+      "line-dasharray": [4, 2],
+    },
+  });
+  map.addLayer({
+    id: "her1-line",
+    type: "line",
+    source: "her1",
+    "source-layer": "her1",
+    layout: { visibility: "none" },
+    paint: {
+      "line-color": "#c4b5fd",
+      "line-width": 1,
+      "line-opacity": 0.6,
+      "line-dasharray": [2, 2],
     },
   });
 }
+
+/** Épaisseur d'un cours d'eau interpolée sur sa longueur cumulée amont (log). */
+function largeurSelonImportance(min: number, max: number): ExpressionSpecification {
+  return [
+    "interpolate",
+    ["linear"],
+    ["log10", ["max", ["coalesce", ["get", "cum_amont_km"], 1], 1]],
+    0,
+    min,
+    5,
+    max,
+  ] as unknown as ExpressionSpecification;
+}
+
+// --- Curseur d'importance ------------------------------------------------------
+const slider = document.getElementById("importance") as HTMLInputElement;
+const sliderValeur = document.getElementById("importance-valeur") as HTMLOutputElement;
+
+function appliquerSeuil() {
+  seuilImportance = PALIERS[Number(slider.value)];
+  sliderValeur.textContent =
+    seuilImportance === 0 ? "toutes" : `≥ ${formatNumber(seuilImportance)} km cumulés`;
+  if (!map.getLayer("cours-eau-line")) return;
+  const filtre: maplibregl.FilterSpecification | null =
+    seuilImportance === 0
+      ? null
+      : [">=", ["coalesce", ["get", "cum_amont_km"], 0], seuilImportance];
+  map.setFilter("cours-eau-line", filtre);
+}
+
+slider.addEventListener("input", appliquerSeuil);
 
 // --- Fond de carte ------------------------------------------------------------
 function setBasemap(id: BasemapId) {
@@ -178,6 +291,21 @@ function setBasemap(id: BasemapId) {
   const first = map.getStyle().layers?.[0]?.id;
   map.addLayer({ id: "fond", type: "raster", source: "fond" }, first);
 
+  // Sur un fond clair, les mêmes teintes doivent porter davantage.
+  const clair = !BASEMAPS[id].sombre;
+  if (map.getLayer("bassins-fill")) {
+    map.setPaintProperty("bassins-fill", "fill-opacity", [
+      "case",
+      ["boolean", ["feature-state", "hover"], false],
+      clair ? 0.45 : 0.55,
+      clair ? 0.3 : 0.22,
+    ]);
+    map.setPaintProperty("bassins-line", "line-opacity", clair ? 0.75 : 0.5);
+    map.setPaintProperty("bassins-hydro-line", "line-color", clair ? "#1e293b" : "#e2e8f0");
+    map.setPaintProperty("fleuve-bassin-fill", "fill-color", clair ? "#0f172a" : "#f8fafc");
+    map.setPaintProperty("fleuve-bassin-line", "line-color", clair ? "#0f172a" : "#f8fafc");
+  }
+
   document.querySelectorAll<HTMLButtonElement>("#basemap-switch button").forEach((btn) => {
     btn.classList.toggle("is-active", btn.dataset.fond === id);
   });
@@ -186,7 +314,7 @@ function setBasemap(id: BasemapId) {
 // Si le service IGN ne répond pas, on bascule une fois sur OSM (aucune clé requise).
 map.on("error", (event) => {
   const message = String((event as { error?: Error }).error?.message ?? "");
-  if (ignFallbackDone || currentBasemap === "osm") return;
+  if (ignFallbackDone || currentBasemap !== "plan") return;
   if (message.includes("data.geopf.fr") || message.includes("geopf")) {
     ignFallbackDone = true;
     console.warn("Fond IGN indisponible, bascule sur OpenStreetMap.");
@@ -194,7 +322,38 @@ map.on("error", (event) => {
   }
 });
 
-// --- Barre latérale -----------------------------------------------------------
+// --- Onglets de la barre latérale ---------------------------------------------
+document.getElementById("tabs")!.addEventListener("click", (event) => {
+  const btn = (event.target as HTMLElement).closest<HTMLButtonElement>("button.tab");
+  if (!btn) return;
+  const cible = btn.dataset.onglet;
+  document
+    .querySelectorAll("#tabs .tab")
+    .forEach((tab) => tab.classList.toggle("is-active", tab === btn));
+  document.getElementById("panneau-fleuves")!.hidden = cible !== "fleuves";
+  document.getElementById("panneau-recherche")!.hidden = cible !== "recherche";
+});
+
+// --- Bascule des couches -------------------------------------------------------
+const COUCHE_LAYERS: Record<string, string[]> = {
+  bassins: ["fleuves-bassins-teinte", "fleuves-bassins-contour", "bassins-fill", "bassins-line"],
+  plans_eau: ["plans-eau-fill"],
+  bassins_hydro: ["bassins-hydro-line"],
+  her1: ["her1-line"],
+};
+
+document.getElementById("couches")!.addEventListener("change", (event) => {
+  const input = event.target as HTMLInputElement;
+  const layers = COUCHE_LAYERS[input.dataset.couche ?? ""];
+  if (!layers) return;
+  for (const id of layers) {
+    if (map.getLayer(id)) {
+      map.setLayoutProperty(id, "visibility", input.checked ? "visible" : "none");
+    }
+  }
+});
+
+// --- Barre latérale : recherche -----------------------------------------------
 const searchInput = document.getElementById("search") as HTMLInputElement;
 const resultsList = document.getElementById("results") as HTMLUListElement;
 const resultCount = document.getElementById("result-count") as HTMLParagraphElement;
@@ -204,7 +363,7 @@ function normalize(text: string) {
   return text
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+    .replace(/[̀-ͯ]/g, "");
 }
 
 function formatNumber(value: number) {
@@ -287,6 +446,113 @@ document.getElementById("basemap-switch")!.addEventListener("click", (event) => 
   if (btn?.dataset.fond) setBasemap(btn.dataset.fond as BasemapId);
 });
 
+// --- Liste des fleuves principaux ---------------------------------------------
+const fleuvesList = document.getElementById("fleuves") as HTMLUListElement;
+
+function renderFleuves() {
+  fleuvesList.replaceChildren(
+    ...fleuves.map((fleuve) => {
+      const li = document.createElement("li");
+      li.className = "fleuve";
+      li.dataset.id = fleuve.id;
+      li.setAttribute("role", "option");
+      li.tabIndex = 0;
+      if (selectedFleuve?.id === fleuve.id) li.classList.add("is-selected");
+
+      const puce = document.createElement("span");
+      puce.className = "puce";
+      puce.style.background = stemColor(fleuve.stem);
+
+      const name = document.createElement("span");
+      name.className = "fleuve-nom";
+      name.textContent = fleuve.nom;
+
+      const meta = document.createElement("span");
+      meta.className = "fleuve-meta";
+      meta.textContent =
+        `${formatNumber(Math.round(fleuve.cum_amont_km))} km cumulés · ` +
+        `${formatNumber(Math.round(fleuve.surface_km2))} km²`;
+
+      li.append(puce, name, meta);
+      return li;
+    }),
+  );
+}
+
+function selectFleuve(id: string) {
+  const fleuve = fleuves.find((f) => f.id === id);
+  if (!fleuve) return;
+  selectedFleuve = fleuve;
+  clearSelection({ garderFleuve: true });
+
+  map.setFilter("fleuve-bassin-fill", ["==", ["get", "id"], id]);
+  map.setFilter("fleuve-bassin-line", ["==", ["get", "id"], id]);
+
+  fleuvesList.querySelectorAll("li.fleuve").forEach((li) => {
+    li.classList.toggle("is-selected", (li as HTMLLIElement).dataset.id === id);
+  });
+
+  infoKind.textContent = "Fleuve principal";
+  infoKind.className = "info-kind couche-fleuve";
+  infoName.textContent = fleuve.nom;
+  fillAttrs([
+    ["Longueur", `${formatNumber(fleuve.longueur_km)} km`],
+    ["Réseau amont cumulé", `${formatNumber(Math.round(fleuve.cum_amont_km))} km`],
+    ["Affluents directs", formatNumber(fleuve.nb_affluents)],
+    ["Cours d'eau à l'amont", formatNumber(fleuve.nb_amont_total)],
+    ["Bassin agrégé", `${formatNumber(Math.round(fleuve.surface_km2))} km²`],
+    ["Bassins versants", formatNumber(fleuve.nb_bassins)],
+    ["Code Sandre", fleuve.id],
+  ]);
+  infoPanel.hidden = false;
+  infoZoom.hidden = false;
+
+  map.fitBounds(
+    [
+      [fleuve.bbox[0], fleuve.bbox[1]],
+      [fleuve.bbox[2], fleuve.bbox[3]],
+    ],
+    { padding: 60, maxZoom: 11, duration: 900 },
+  );
+}
+
+fleuvesList.addEventListener("click", (event) => {
+  const li = (event.target as HTMLElement).closest<HTMLLIElement>("li.fleuve");
+  if (li?.dataset.id) selectFleuve(li.dataset.id);
+});
+fleuvesList.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  const li = (event.target as HTMLElement).closest<HTMLLIElement>("li.fleuve");
+  if (li?.dataset.id) selectFleuve(li.dataset.id);
+});
+
+// --- Légende -------------------------------------------------------------------
+function renderLegend() {
+  const items = document.getElementById("legend-items") as HTMLUListElement;
+  // `stems.json` recense exactement les teintes présentes sur la carte — s'y
+  // fier évite qu'une couleur apparaisse sans entrée de légende.
+  const teintes = [...stems].sort((a, b) => a.stem - b.stem).slice(0, STEM_COLORS.length);
+
+  items.replaceChildren(
+    ...teintes.map((entree) => {
+      const li = document.createElement("li");
+      const puce = document.createElement("span");
+      puce.className = "puce";
+      puce.style.background = stemColor(entree.stem);
+      li.append(puce, document.createTextNode(entree.nom));
+      return li;
+    }),
+  );
+
+  const autres = document.createElement("li");
+  const puce = document.createElement("span");
+  puce.className = "puce";
+  puce.style.background = NEUTRAL;
+  autres.append(puce, document.createTextNode("Autres bassins"));
+  items.append(autres);
+}
+
 // --- Sélection et panneau d'info ---------------------------------------------
 const infoPanel = document.getElementById("info-panel") as HTMLElement;
 const infoKind = document.getElementById("info-kind") as HTMLElement;
@@ -296,40 +562,56 @@ const infoZoom = document.getElementById("info-zoom") as HTMLButtonElement;
 
 const ATTR_LABELS: Record<string, string> = {
   id: "Code Sandre",
-  type: "Type",
-  cd_bh: "Bassin hydrographique",
-  exutoire: "Code exutoire",
-  surface_km2: "Superficie",
+  cd_bh: "Grand bassin",
+  fleuve: "Se jette dans",
+  cum_amont_km: "Réseau amont cumulé",
+  nb_affluents: "Affluents directs",
+  nb_amont: "Cours d'eau à l'amont",
   longueur_km: "Longueur",
+  surface_km2: "Superficie",
   surface_ha: "Superficie",
   nature: "Nature",
-  source: "Source",
 };
 
 const ATTR_UNITS: Record<string, string> = {
   surface_km2: " km²",
   longueur_km: " km",
+  cum_amont_km: " km",
   surface_ha: " ha",
 };
+
+function fillAttrs(pairs: [string, string][]) {
+  infoAttrs.replaceChildren();
+  for (const [label, value] of pairs) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    infoAttrs.append(dt, dd);
+  }
+}
 
 function fillInfoPanel(couche: LayerId, props: Record<string, unknown>) {
   infoKind.textContent = LAYER_LABELS[couche];
   infoKind.className = `info-kind couche-${couche}`;
   infoName.textContent = (props.nom as string) || "Entité sans nom";
 
-  infoAttrs.replaceChildren();
-  for (const [key, label] of Object.entries(ATTR_LABELS)) {
-    const value = props[key];
-    if (value === undefined || value === null || value === "") continue;
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    dd.textContent =
-      typeof value === "number"
-        ? formatNumber(value) + (ATTR_UNITS[key] ?? "")
-        : String(value);
-    infoAttrs.append(dt, dd);
-  }
+  fillAttrs(
+    Object.entries(ATTR_LABELS)
+      .filter(([key]) => {
+        const value = props[key];
+        return value !== undefined && value !== null && value !== "";
+      })
+      .map(([key, label]) => {
+        const value = props[key];
+        return [
+          label,
+          typeof value === "number"
+            ? formatNumber(value) + (ATTR_UNITS[key] ?? "")
+            : String(value),
+        ];
+      }),
+  );
   infoPanel.hidden = false;
 }
 
@@ -343,6 +625,17 @@ function applySelectionFilters() {
 }
 
 function zoomToSelection() {
+  if (selectedFleuve && !selected) {
+    const b = selectedFleuve.bbox;
+    map.fitBounds(
+      [
+        [b[0], b[1]],
+        [b[2], b[3]],
+      ],
+      { padding: 60, maxZoom: 11, duration: 900 },
+    );
+    return;
+  }
   if (!selected) return;
   const bbox = bboxById.get(selected.id);
   if (!bbox) return;
@@ -379,18 +672,24 @@ function entryProps(id: string, couche: LayerId): Record<string, unknown> | null
   const entry = entries.find((item) => item.id === id && item.couche === couche);
   if (!entry) return null;
   const key =
-    couche === "bassins" ? "surface_km2" : couche === "cours_eau" ? "longueur_km" : "surface_ha";
+    couche === "bassins" ? "surface_km2" : couche === "cours_eau" ? "cum_amont_km" : "surface_ha";
   return { id: entry.id, nom: entry.nom, [key]: entry.valeur };
 }
 
-function clearSelection() {
+function clearSelection(options: { garderFleuve?: boolean } = {}) {
   selected = null;
   applySelectionFilters();
-  infoPanel.hidden = true;
+  if (!options.garderFleuve) {
+    selectedFleuve = null;
+    map.setFilter("fleuve-bassin-fill", ["==", ["get", "id"], ""]);
+    map.setFilter("fleuve-bassin-line", ["==", ["get", "id"], ""]);
+    fleuvesList.querySelectorAll("li.fleuve").forEach((li) => li.classList.remove("is-selected"));
+    infoPanel.hidden = true;
+  }
   resultsList.querySelectorAll("li.result").forEach((li) => li.classList.remove("is-selected"));
 }
 
-document.getElementById("info-close")!.addEventListener("click", clearSelection);
+document.getElementById("info-close")!.addEventListener("click", () => clearSelection());
 infoZoom.addEventListener("click", zoomToSelection);
 
 // --- Interactions carte -------------------------------------------------------
@@ -406,16 +705,14 @@ map.on("click", (event) => {
     layers: CLICKABLE.filter((id) => map.getLayer(id)),
   });
   // priorité aux entités les plus fines : rivière > plan d'eau > bassin
-  const order = ["cours-eau-line", "plans-eau-fill", "bassins-fill"];
-  const hit = order
-    .map((layerId) => features.find((f) => f.layer.id === layerId))
-    .find(Boolean);
+  const hit = CLICKABLE.map((layerId) => features.find((f) => f.layer.id === layerId)).find(
+    Boolean,
+  );
   if (!hit) {
     clearSelection();
     return;
   }
-  const couche = LAYER_OF[hit.layer.id];
-  select(String(hit.properties.id), couche, {
+  select(String(hit.properties.id), LAYER_OF[hit.layer.id], {
     props: hit.properties as Record<string, unknown>,
   });
 });
@@ -424,18 +721,18 @@ map.on("mousemove", "bassins-fill", (event) => {
   const feature = event.features?.[0];
   if (!feature) return;
   const id = String(feature.id ?? feature.properties?.id ?? "");
-  if (hovered?.id === id) return;
+  if (hovered === id) return;
   if (hovered) {
-    map.setFeatureState({ source: "bassins", sourceLayer: "bassins", id: hovered.id }, { hover: false });
+    map.setFeatureState({ source: "bassins", sourceLayer: "bassins", id: hovered }, { hover: false });
   }
-  hovered = { id, couche: "bassins" };
+  hovered = id;
   map.setFeatureState({ source: "bassins", sourceLayer: "bassins", id }, { hover: true });
   map.getCanvas().style.cursor = "pointer";
 });
 
 map.on("mouseleave", "bassins-fill", () => {
   if (hovered) {
-    map.setFeatureState({ source: "bassins", sourceLayer: "bassins", id: hovered.id }, { hover: false });
+    map.setFeatureState({ source: "bassins", sourceLayer: "bassins", id: hovered }, { hover: false });
   }
   hovered = null;
   map.getCanvas().style.cursor = "";
@@ -443,9 +740,15 @@ map.on("mouseleave", "bassins-fill", () => {
 
 // --- Démarrage ----------------------------------------------------------------
 async function start() {
-  const response = await fetch(`${BASE}index.json`);
-  const index: IndexFile = await response.json();
+  const [index, fleuvesData, stemsData] = await Promise.all([
+    fetch(`${BASE}index.json`).then((r) => r.json() as Promise<IndexFile>),
+    fetch(`${BASE}fleuves.json`).then((r) => r.json() as Promise<Fleuve[]>),
+    fetch(`${BASE}stems.json`).then((r) => r.json() as Promise<Stem[]>),
+  ]);
+
   entries = index.entites;
+  fleuves = fleuvesData;
+  stems = stemsData;
   for (const entry of entries) bboxById.set(entry.id, entry.bbox);
 
   document.getElementById("zone-stats")!.textContent =
@@ -453,7 +756,10 @@ async function start() {
     `${formatNumber(index.stats.cours_eau)} cours d'eau · ` +
     `${formatNumber(index.stats.plans_eau)} plans d'eau`;
 
+  renderFleuves();
+  renderLegend();
   renderResults();
+  appliquerSeuil();
 
   const [minx, miny, maxx, maxy] = index.zone.bbox;
   map.fitBounds(
