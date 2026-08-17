@@ -1,3 +1,4 @@
+import "./sentry";
 import maplibregl, { type ExpressionSpecification } from "maplibre-gl";
 import { Protocol } from "pmtiles";
 import "maplibre-gl/dist/maplibre-gl.css";

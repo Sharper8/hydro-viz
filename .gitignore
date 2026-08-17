@@ -7,6 +7,12 @@ node_modules/
 web/dist/
 *.log
 
+# Env local (GLITCHTIP_DSN injecté au build via secret GitHub, jamais commité)
+.env
+.env.local
+web/.env
+web/.env.local
+
 # Divers
 .DS_Store
 .venv/

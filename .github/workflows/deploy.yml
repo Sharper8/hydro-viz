@@ -48,6 +48,9 @@ jobs:
 
       - name: Build du frontend
         working-directory: web
+        env:
+          # DSN injecté au build (jamais commité) — secret GitHub GLITCHTIP_DSN.
+          VITE_GLITCHTIP_DSN: ${{ secrets.GLITCHTIP_DSN }}
         run: |
           npm ci
           npm run build
