@@ -51,6 +51,10 @@ jobs:
         env:
           # DSN injecté au build (jamais commité) — secret GitHub GLITCHTIP_DSN.
           VITE_GLITCHTIP_DSN: ${{ secrets.GLITCHTIP_DSN }}
+          # Analitique Plausible auto-hébergée — domaine public, pas de secret
+          # requis. Le script de tracking n'est injecté que si cette variable
+          # est définie (no-op en dev local).
+          VITE_PLAUSIBLE_DOMAIN: "analytics.devprocore.com"
         run: |
           npm ci
           npm run build
