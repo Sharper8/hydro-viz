@@ -11,10 +11,10 @@
   "dependencies": {
     "@sentry/browser": "^8.0.0",
     "maplibre-gl": "^5.9.0",
-    "pmtiles": "^4.4.0"
+    "pmtiles": "^4.5.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "typescript": "^5.9.0",
     "vite": "^7.1.0"
   }
