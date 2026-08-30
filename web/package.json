@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@sentry/browser": "^8.0.0",
-    "maplibre-gl": "^5.9.0",
+    "maplibre-gl": "^6.6.0",
     "pmtiles": "^4.5.0"
   },
   "devDependencies": {
