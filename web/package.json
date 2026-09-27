@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@sentry/browser": "^8.0.0",
+    "@sentry/browser": "^11.0.0",
     "maplibre-gl": "^6.11.2",
     "pmtiles": "^4.5.0"
   },
